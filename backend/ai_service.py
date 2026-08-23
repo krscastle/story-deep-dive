@@ -76,7 +76,7 @@ class AIService:
             return self._call_openai_compat(prompt, system, active_key, provider, model, base_url)
 
     def _call_gemini(self, prompt: str, system: str, api_key: str, model: str = "") -> Optional[Dict[str, Any]]:
-        models_to_try = [m for m in [model, "gemini-1.5-flash", "gemini-2.0-flash", "gemini-1.5-pro"] if m]
+        models_to_try = [m for m in [model, "gemini-3.5-flash-lite", "gemini-2.5-flash", "gemini-3.7-flash"] if m]
         for m in models_to_try:
             try:
                 url = f"https://generativelanguage.googleapis.com/v1beta/models/{m}:generateContent?key={urllib.parse.quote(api_key)}"
@@ -346,6 +346,22 @@ class AIService:
             return result
         return None
 
+    def _filter_vocabulary(self, vocabulary: List[Dict], full_text: str) -> List[Dict]:
+        """Drop any vocabulary word not actually found in the story text — otherwise
+        the model can drift toward generic 'sounds sophisticated' words instead of
+        words genuinely drawn from this specific story."""
+        if not full_text:
+            return vocabulary
+        lower_text = full_text.lower()
+        good = []
+        for v in vocabulary:
+            word = (v.get("word") or "").strip()
+            if word and re.search(r'\b' + re.escape(word.lower()) + r'\b', lower_text):
+                good.append(v)
+            else:
+                print(f"[Grounding FAIL] Vocabulary word not found in text: '{word}'")
+        return good
+
     def _call_vocabulary(self, title, author, text, **kwargs) -> Optional[Dict]:
         tb = self._text_block(text)
         has_text = len(text.strip()) > 30
@@ -369,9 +385,13 @@ class AIService:
             '   "etymology": "<Latin/Greek/etc root>"}\n'
             ']}'
         )
-        return self.call_ai(prompt, self._system(), **kwargs)
-
-    def _call_storymap(self, title, author, text, **kwargs) -> Optional[Dict]:
+        result = self.call_ai(prompt, self._system(), **kwargs)
+        if result and isinstance(result.get("vocabulary"), list) and len(text.strip()) > 30:
+            result["vocabulary"] = self._filter_vocabulary(result["vocabulary"], text)
+            if not result["vocabulary"]:
+                print("[Vocabulary] All words failed grounding check against the actual text — discarding response.")
+                return None
+        return result
         tb = self._text_block(text)
         prompt = (
             f"Map the narrative of \"{title}\" by \"{author}\" onto Freytag's Pyramid.{tb}\n\n"

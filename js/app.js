@@ -47,10 +47,21 @@ class StoryDeepDiveApp {
   async init() {
     this.bindEvents();
     this.initApiModal();
-    
-    // Load last active work or default to The Tell-Tale Heart
-    const savedWorkId = localStorage.getItem('sdd_last_work_id') || 'the-tell-tale-heart';
-    await this.loadWork(savedWorkId);
+
+    // Restore the title/author of your last-viewed work into the input fields
+    // WITHOUT automatically re-running a live analysis on every page load.
+    // Click "Analyze" (or pick a preset) when you're ready to generate.
+    const savedWorkId = localStorage.getItem('sdd_last_work_id');
+    if (savedWorkId) {
+      const presets = (typeof PRESET_WORKS !== 'undefined' ? PRESET_WORKS : (window.PRESET_WORKS || {}));
+      const preset = presets[savedWorkId];
+      if (preset) {
+        const titleInput = document.getElementById('work-title-input');
+        const authorInput = document.getElementById('work-author-input');
+        if (titleInput) titleInput.value = preset.title;
+        if (authorInput) authorInput.value = preset.author;
+      }
+    }
 
     // Check URL hash for tab routing
     const hash = window.location.hash.replace('#', '');

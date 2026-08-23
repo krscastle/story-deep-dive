@@ -245,7 +245,29 @@ export class AnalysisPipeline {
     if (parsed && lens === 'annotations' && parsed.paragraphs && text) {
       parsed.paragraphs = this._filterGroundedAnnotations(parsed.paragraphs, text);
     }
+    if (parsed && lens === 'vocabulary' && Array.isArray(parsed.vocabulary) && text && text.trim().length > 30) {
+      parsed.vocabulary = this._filterGroundedVocabulary(parsed.vocabulary, text);
+      if (parsed.vocabulary.length === 0) {
+        console.warn('[Vocabulary] All words failed grounding check against the actual text — discarding response.');
+        return null;
+      }
+    }
     return parsed;
+  }
+
+  /** Drop any vocabulary entry whose word doesn't actually appear in the story text —
+   *  otherwise the model can drift toward generic "sounds sophisticated" words instead
+   *  of words genuinely drawn from this specific story. */
+  _filterGroundedVocabulary(vocabList, fullText) {
+    const lowerText = fullText.toLowerCase();
+    return vocabList.filter(v => {
+      if (!v || !v.word) return false;
+      const escaped = v.word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const re = new RegExp(`\\b${escaped}\\b`, 'i');
+      const found = re.test(fullText) || lowerText.includes(v.word.toLowerCase());
+      if (!found) console.warn(`[Vocabulary] Dropping ungrounded word: '${v.word}'`);
+      return found;
+    });
   }
 
   /** Make one AI call and return the raw text response */
@@ -255,7 +277,7 @@ export class AnalysisPipeline {
 
     try {
       if (provider === 'gemini') {
-        const model = this.model || 'gemini-1.5-flash';
+        const model = this.model || 'gemini-3.5-flash-lite';
         const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(this.apiKey)}`;
         const resp = await fetch(url, {
           method: 'POST',
@@ -400,6 +422,20 @@ export class AnalysisPipeline {
   }
 
   /** deepdive: 5 separate focused calls — one per pillar */
+  /** Pull a pillar's data out of a parsed response even if the model didn't
+   *  nest it under the exact expected key (e.g. used an underscore, or
+   *  returned the fields unwrapped at the top level). */
+  _extractPillarData(parsed, pillarId) {
+    if (!parsed || typeof parsed !== 'object') return null;
+    if (parsed[pillarId]) return parsed[pillarId];
+    const altKey = pillarId.replace(/-/g, '_');
+    if (parsed[altKey]) return parsed[altKey];
+    if (parsed.summary || parsed.keyPoints || parsed.pullQuotes) return parsed; // returned unwrapped
+    const keys = Object.keys(parsed);
+    if (keys.length === 1) return parsed[keys[0]]; // single unexpected wrapper key
+    return null;
+  }
+
   async _callDeepDiveMulti(title, author, text) {
     const hasText = text && text.trim().length > 30;
     const textBlock = hasText ? `\n\nSTORY TEXT:\n---\n${text.substring(0, 100000)}\n---\n` : '';
@@ -415,7 +451,7 @@ export class AnalysisPipeline {
       const prompt = (
         `Analyse "${title}" by "${author}" — FOCUS ONLY ON: ${pillarFocus}.${textBlock}\n` +
         `Write analysis grounded in specific scenes, character names, and quoted lines from this story.\n\n` +
-        `Return this exact JSON:\n` +
+        `Return this exact JSON (use this exact top-level key, do not rename or omit it):\n` +
         `{"${pillarId}":{"id":"${pillarId}","title":"${pillarTitle}",` +
         `"subtitle":"<a specific phrase naming the central dynamic of this pillar IN THIS STORY>",` +
         `"summary":"<3-5 sentences of analysis grounded in actual story events>",` +
@@ -425,11 +461,14 @@ export class AnalysisPipeline {
       const raw = await this._callRawAI(prompt);
       if (raw) {
         const parsed = this.parseCleanJson(raw);
-        if (parsed && parsed[pillarId]) {
-          deepDive[pillarId] = parsed[pillarId];
+        const pillarData = this._extractPillarData(parsed, pillarId);
+        if (pillarData) {
+          deepDive[pillarId] = { id: pillarId, title: pillarTitle, ...pillarData };
         } else {
-          console.warn(`[DeepDive] Pillar '${pillarId}' returned no data`);
+          console.warn(`[DeepDive] Pillar '${pillarId}' returned no usable data`, parsed);
         }
+      } else {
+        console.warn(`[DeepDive] Pillar '${pillarId}' got no response from AI`);
       }
     }
     return Object.keys(deepDive).length > 0 ? { deepDive } : null;
